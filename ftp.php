@@ -53,6 +53,16 @@ class FTP
      */
     private $messages = [];
 
+    /*private*/ const FILETYPES = [
+        'd' => 'Directory',
+        '-' => 'File',
+        'l' => 'Link',
+        'c' => 'Character Device',
+        'b' => 'Block Device',
+        's' => 'Socket',
+        'p' => 'Pipe',
+    ];
+
     /**
      * Calculates the port for passive connection
      *
@@ -111,6 +121,9 @@ class FTP
 
         if (is_resource($this->ftp)) {
 
+            stream_set_blocking($this->ftp, true);
+            stream_set_timeout($this->ftp, 90);
+
             $this->messages[] = fread($this->ftp, 1024);
             fwrite($this->ftp, 'USER '.$this->ftp_username.PHP_EOL);
             $this->messages[] =  fread($this->ftp, 1024);
@@ -140,7 +153,7 @@ class FTP
      * @param type $directory
      * @return string
      */
-    public function listFiles($directory = '.'): string
+    public function listFiles(string $directory = '.'): array
     {
         fwrite($this->ftp, 'LIST '.$directory.PHP_EOL);
         if ($this->passive_mode) {
@@ -150,7 +163,54 @@ class FTP
         }
         $this->messages[] = $response;
 
-        return $response;
+        $directory_listing = [];
+        foreach (preg_split('/\s*\R/', rtrim($response), NULL, PREG_SPLIT_NO_EMPTY) as $line) {
+            preg_match('/([d-lcbsp])([r-][w-][x-][r-][w-][x-][r-][w-][x-])\s{1,}(\d{1,2})\s{1,}(\d{1,4})\s{1,}(\d{1,5})\s{1,}(\d{1,5})\s{1,}(\w{3}\s{1,}\d{1,2}\s{1,}(?:\d{1,4}|\d{1,2}:\d{1,2}))\s{1,}(\w{1,})/', $line, $parts);
+
+            $directory_listing[] = [
+                'type' => self::FILETYPES[$parts[1]],
+                'permissions' => $parts[2],
+                'hard_links' => $parts[3],
+                'owner_name' => $parts[4],
+                'group_name' => $parts[5],
+                'size_in' => $parts[6],
+                'timestamp' => $parts[7],
+                'name' => $parts[8],
+            ];
+        }
+        return $directory_listing;
+    }
+
+    /**
+     * Change the directory to the defined one
+     *
+     * @param string $directory
+     */
+    public function changeDirectory(string $directory)
+    {
+        fwrite($this->ftp, 'CWD '.$directory.PHP_EOL);
+
+        return $this->getResponseCode() === 250 ? true : false;
+    }
+
+    /**
+     * Get a integer response code
+     *
+     * @return int
+     */
+    private function getResponseCode(): int
+    {
+        $first_line = true;
+        do {
+            $response = fgets($this->ftp, 8129);
+            if ($first_line) {
+                $response_code = substr($response, 0, 3);
+            }
+            $this->messages[] = $response;
+            $status = socket_get_status($this->ftp);
+        } while ($status['unread_bytes'] > 0 || preg_match('/^\d\d\d\s/', $response) !== 1);
+
+        return intval($response_code);
     }
 
     /**
@@ -166,7 +226,9 @@ class FTP
     public function __destruct() {
         fwrite($this->ftp, 'QUIT'.PHP_EOL);
         fclose($this->ftp);
-        fclose($this->ftp_data);
+        if (is_resource($this->ftp_data)) {
+            fclose($this->ftp_data);
+        }
     }
 
     /**
@@ -178,13 +240,4 @@ class FTP
     {
         return $this->messages;
     }
-
-
 }
-
-$ftp = new FTP('ftp.rz.uni-wuerzburg.de');
-$ftp->startPassiveMode();
-$ftp->listFiles();
-$ftp->disconnect();
-
-var_dump($ftp->getMessages());
